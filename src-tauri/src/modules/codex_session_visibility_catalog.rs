@@ -763,7 +763,7 @@ fn plan_sqlite_thread_timestamp_repair_for_db(
         let timestamp_seconds = (timestamp_ms / 1000) as i64;
         let timestamp_ms = timestamp_seconds * 1000;
         if current_ms
-            .map(|current_ms| (current_ms - timestamp_ms).abs() <= 1000)
+            .map(|current_ms| (current_ms - timestamp_ms as i128).abs() <= 1000)
             .unwrap_or(false)
         {
             continue;
