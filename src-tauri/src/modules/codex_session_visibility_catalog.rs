@@ -365,12 +365,10 @@ fn resolve_thread_updated_at_ms(data_dir: &Path, row: &SqliteThreadIndexRow) -> 
         .map(|value| value as i128)
         .or_else(|| row.updated_at.map(|value| value as i128 * 1000));
     match (sqlite_ms, rollout_activity_ms) {
-        (Some(sqlite_ms), Some(activity_ms))
-            if (sqlite_ms - activity_ms).abs() > SESSION_INDEX_ACTIVITY_DRIFT_MS =>
-        {
-            Some(activity_ms)
+        (Some(sqlite_ms), Some(activity_ms)) => {
+            Some(sqlite_ms.max(activity_ms))
         }
-        (Some(sqlite_ms), _) => Some(sqlite_ms),
+        (Some(sqlite_ms), None) => Some(sqlite_ms),
         (None, Some(activity_ms)) => Some(activity_ms),
         (None, None) => None,
     }
@@ -407,7 +405,14 @@ fn build_updated_session_index_entry(
     object.insert(
         "updated_at".to_string(),
         JsonValue::String(format_thread_updated_at_iso_ms(
-            resolve_thread_updated_at_ms(data_dir, row),
+            match (
+                parse_session_index_updated_at_ms(existing),
+                resolve_thread_updated_at_ms(data_dir, row),
+            ) {
+                (Some(current_ms), Some(target_ms)) => Some(current_ms.max(target_ms)),
+                (Some(current_ms), None) => Some(current_ms),
+                (None, target_ms) => target_ms,
+            },
         )),
     );
     entry
@@ -587,6 +592,28 @@ fn rollout_file_activity_ms(path: &Path) -> Option<i128> {
         .max()
 }
 
+fn rollout_file_modified_at_ms(path: &Path) -> Option<i128> {
+    modules::codex_session_file_time::read_modified_time(path)
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_millis() as i128)
+}
+
+fn latest_rollout_timestamp_ms(
+    rollout_path: &Path,
+    indexed_ms: Option<i128>,
+    fallback_ms: Option<i128>,
+) -> Option<i128> {
+    [
+        indexed_ms,
+        rollout_file_activity_ms(rollout_path),
+        rollout_file_modified_at_ms(rollout_path),
+        fallback_ms,
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+}
+
 fn resolve_target_modified_at_ms(
     session_id: Option<&str>,
     session_index_map: &HashMap<String, JsonValue>,
@@ -596,17 +623,7 @@ fn resolve_target_modified_at_ms(
     let indexed = session_id
         .and_then(|id| session_index_map.get(id))
         .and_then(parse_session_index_updated_at_ms);
-    let activity = rollout_file_activity_ms(rollout_path);
-    match (indexed, activity) {
-        (Some(indexed), Some(activity))
-            if (indexed - activity).abs() > SESSION_INDEX_ACTIVITY_DRIFT_MS =>
-        {
-            Some(activity)
-        }
-        (Some(indexed), _) => Some(indexed),
-        (None, Some(activity)) => Some(activity),
-        (None, None) => fallback_ms,
-    }
+    latest_rollout_timestamp_ms(rollout_path, indexed, fallback_ms)
 }
 
 fn resolve_rollout_path(data_dir: &Path, rollout_path: &str) -> PathBuf {
@@ -737,21 +754,24 @@ fn plan_sqlite_thread_timestamp_repair_for_db(
         if !rollout.exists() {
             continue;
         }
-        let Some(activity_ms) = rollout_file_activity_ms(&rollout) else {
-            continue;
-        };
-        let activity_seconds = (activity_ms / 1000) as i64;
-        let activity_ms = activity_seconds * 1000;
         let current_ms = updated_at_ms
             .or_else(|| updated_at.map(|value| value * 1000))
-            .unwrap_or(0);
-        if i64::abs(current_ms - activity_ms) <= 1000 {
+            .map(|value| value as i128);
+        let Some(timestamp_ms) = latest_rollout_timestamp_ms(&rollout, current_ms, None) else {
+            continue;
+        };
+        let timestamp_seconds = (timestamp_ms / 1000) as i64;
+        let timestamp_ms = timestamp_seconds * 1000;
+        if current_ms
+            .map(|current_ms| (current_ms - timestamp_ms).abs() <= 1000)
+            .unwrap_or(false)
+        {
             continue;
         }
         updates.push(SqliteTimestampUpdate {
             id: thread_id,
-            updated_at_seconds: activity_seconds,
-            updated_at_ms: activity_ms,
+            updated_at_seconds: timestamp_seconds,
+            updated_at_ms: timestamp_ms,
         });
     }
     Ok(SqliteTimestampRepairPlan {

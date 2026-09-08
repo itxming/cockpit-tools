@@ -24,6 +24,89 @@ use super::*;
     }
 
     #[test]
+    fn rollout_timestamp_repair_uses_the_newest_available_source() {
+        let data_dir = make_temp_dir("codex-session-timestamp-source-test");
+        let rollout_path = data_dir.join("sessions/2026/09/08/rollout-thread.jsonl");
+        fs::create_dir_all(rollout_path.parent().expect("rollout parent"))
+            .expect("create rollout dir");
+        fs::write(
+            &rollout_path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-1\"}}\n",
+                "{\"type\":\"event\",\"timestamp\":\"2026-06-02T01:02:03Z\"}\n",
+            ),
+        )
+        .expect("write rollout");
+        let indexed_ms = 1_780_362_060i128;
+        let fallback_ms = 1_780_362_150i128;
+        let expected = [
+            Some(indexed_ms),
+            rollout_file_activity_ms(&rollout_path),
+            rollout_file_modified_at_ms(&rollout_path),
+            Some(fallback_ms),
+        ]
+        .into_iter()
+        .flatten()
+        .max();
+
+        assert_eq!(
+            resolve_target_modified_at_ms(
+                Some("thread-1"),
+                &std::collections::HashMap::from([(
+                    "thread-1".to_string(),
+                    json!({"id": "thread-1", "updated_at": "2026-06-02T01:01:00Z"}),
+                )]),
+                &rollout_path,
+                Some(fallback_ms),
+            ),
+            expected
+        );
+        assert!(expected.expect("timestamp") >= 1_780_362_123);
+
+        fs::remove_dir_all(&data_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn session_index_repair_does_not_downgrade_a_newer_existing_entry() {
+        let data_dir = make_temp_dir("codex-session-index-no-rollback-test");
+        let rollout_path = data_dir.join("sessions/2026/06/02/rollout-thread-1.jsonl");
+        fs::create_dir_all(rollout_path.parent().expect("rollout parent"))
+            .expect("create rollout dir");
+        fs::write(
+            &rollout_path,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"thread-1\"}}\n",
+                "{\"type\":\"event\",\"timestamp\":\"2026-06-02T01:02:03Z\"}\n",
+            ),
+        )
+        .expect("write rollout");
+        let row = SqliteThreadIndexRow {
+            id: "thread-1".to_string(),
+            title: "Thread 1".to_string(),
+            updated_at: Some(1_780_362_123),
+            updated_at_ms: None,
+            rollout_path: Some("sessions/2026/06/02/rollout-thread-1.jsonl".to_string()),
+        };
+        let newer_index = json!({
+            "id": "thread-1",
+            "updated_at": "2026-06-02T01:30:00Z",
+        });
+
+        assert!(session_index_entry_needs_update(
+            &data_dir,
+            &row,
+            &newer_index,
+        ));
+        let updated = build_updated_session_index_entry(&data_dir, &newer_index, &row);
+        assert_eq!(
+            parse_session_index_updated_at_ms(&updated),
+            parse_session_index_updated_at_ms(&newer_index),
+        );
+
+        fs::remove_dir_all(&data_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
     fn provider_discovery_uses_config_and_official_state_db_without_scanning_rollouts() {
         let data_dir = make_temp_dir("codex-session-provider-discovery-test");
         fs::write(

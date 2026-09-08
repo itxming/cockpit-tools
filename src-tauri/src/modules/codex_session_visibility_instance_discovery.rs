@@ -510,15 +510,19 @@ fn collect_referenced_rollout_paths_for_db(
             continue;
         }
         let rollout_path = resolve_rollout_path(data_dir, &rollout_path);
-        let target_modified_at = updated_at_ms
+        let sqlite_timestamp_ms = updated_at_ms
             .or_else(|| updated_at.map(|value| value * 1000))
-            .and_then(|value| {
-                modules::codex_session_file_time::system_time_from_unix_millis(value as i128)
-            });
+            .map(|value| value as i128);
+        let target_modified_at = latest_rollout_timestamp_ms(
+            &rollout_path,
+            sqlite_timestamp_ms,
+            None,
+        )
+        .and_then(modules::codex_session_file_time::system_time_from_unix_millis);
         candidates
             .entry(rollout_path)
             .and_modify(|existing| {
-                if existing.is_none() {
+                if target_modified_at > *existing {
                     *existing = target_modified_at;
                 }
             })

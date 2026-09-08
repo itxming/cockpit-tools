@@ -29,7 +29,6 @@ const SESSION_DIRS: [&str; 2] = ["sessions", "archived_sessions"];
 const SESSION_VISIBILITY_REPAIR_BACKUP_PREFIX: &str = "backup-";
 const SESSION_VISIBILITY_REPAIR_BACKUP_SUFFIX: &str = "-session-visibility-repair";
 const MAX_SESSION_VISIBILITY_REPAIR_BACKUPS: usize = 1;
-const SESSION_INDEX_ACTIVITY_DRIFT_MS: i128 = 3_600_000;
 pub const SESSION_VISIBILITY_REPAIR_PROGRESS_EVENT: &str =
     "codex:session_visibility_repair_progress";
 static SESSION_VISIBILITY_REPAIR_LOCK: Mutex<()> = Mutex::new(());

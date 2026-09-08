@@ -23,7 +23,6 @@ const SESSION_TRASH_ROOT_DIR: &str = "cockpit-tools-codex-session-trash";
 const SESSION_EXPORT_KIND: &str = "codex-session-export";
 const SESSION_EXPORT_VERSION: u32 = 1;
 pub const SESSION_TRANSFER_PROGRESS_EVENT: &str = "codex:session-transfer-progress";
-const SESSION_INDEX_ACTIVITY_DRIFT_SECONDS: i64 = 3_600;
 const TOKEN_STATS_READ_CHUNK_BYTES: usize = 64 * 1024;
 const ROLLOUT_ACTIVITY_READ_CHUNK_BYTES: usize = 64 * 1024;
 const ROLLOUT_ACTIVITY_MAX_SCAN_BYTES: u64 = 4 * 1024 * 1024;
@@ -2371,17 +2370,12 @@ fn resolve_thread_snapshot_updated_at_seconds(
 ) -> Option<i64> {
     let indexed = session_index_entry.and_then(parse_session_index_updated_at_seconds);
     let activity = rollout_file_activity_seconds(rollout_path);
-    let resolved = match (indexed, activity) {
-        (Some(indexed), Some(activity))
-            if indexed.abs_diff(activity) > SESSION_INDEX_ACTIVITY_DRIFT_SECONDS as u64 =>
-        {
-            Some(activity)
-        }
-        (Some(indexed), _) => Some(indexed),
+    match (indexed, activity) {
+        (Some(indexed), Some(activity)) => Some(indexed.max(activity)),
+        (Some(indexed), None) => Some(indexed),
         (None, Some(activity)) => Some(activity),
-        (None, None) => None,
-    };
-    resolved.or_else(|| rollout_file_modified_seconds(rollout_path))
+        (None, None) => rollout_file_modified_seconds(rollout_path),
+    }
 }
 
 fn rollout_file_activity_seconds(path: &Path) -> Option<i64> {
@@ -3101,6 +3095,28 @@ mod tests {
         assert_eq!(
             resolve_thread_snapshot_updated_at_seconds(Some(&current_index), &rollout_path),
             Some(1_780_363_800)
+        );
+
+        fs::remove_dir_all(&base_dir).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn resolve_thread_snapshot_updated_at_never_rolls_back_to_an_older_index() {
+        let base_dir = make_temp_dir("codex-session-updated-at-no-rollback-test");
+        let rollout_path = base_dir.join("rollout-session-1.jsonl");
+        write_rollout(&rollout_path, "session-1", "activity");
+        let slightly_older_index = json!({
+            "id": "session-1",
+            "thread_name": "Slightly older index",
+            "updated_at": "2026-06-02T01:01:30.000000Z",
+        });
+
+        assert_eq!(
+            resolve_thread_snapshot_updated_at_seconds(
+                Some(&slightly_older_index),
+                &rollout_path,
+            ),
+            Some(1_780_362_123)
         );
 
         fs::remove_dir_all(&base_dir).expect("cleanup temp dir");
